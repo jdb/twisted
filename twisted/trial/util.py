@@ -1,5 +1,5 @@
 # -*- test-case-name: twisted.trial.test.test_util -*-
-# Copyright (c) 2001-2009 Twisted Matrix Laboratories.
+# Copyright (c) 2001-2010 Twisted Matrix Laboratories.
 # See LICENSE for details.
 #
 
@@ -16,60 +16,16 @@ Maintainer: Jonathan Lange
 """
 
 import traceback, sys
+from random import randrange
 
 from twisted.internet import defer, utils, interfaces
 from twisted.python.failure import Failure
-
+from twisted.python import deprecate, versions
+from twisted.python.lockfile import FilesystemLock
+from twisted.python.filepath import FilePath
 
 DEFAULT_TIMEOUT = object()
 DEFAULT_TIMEOUT_DURATION = 120.0
-
-
-class FailureError(Exception):
-    """
-    DEPRECATED in Twisted 8.0. This exception is never raised by Trial.
-
-    Wraps around a Failure so it can get re-raised as an Exception.
-    """
-
-    def __init__(self, failure):
-        Exception.__init__(self)
-        self.original = failure
-
-
-
-class DirtyReactorWarning(Warning):
-    """
-    DEPRECATED in Twisted 8.0.
-
-    This warning is not used by Trial any more.
-    """
-
-
-
-class DirtyReactorError(Exception):
-    """
-    DEPRECATED in Twisted 8.0. This is not used by Trial any more.
-    """
-
-    def __init__(self, msg):
-        Exception.__init__(self, self._getMessage(msg))
-
-    def _getMessage(self, msg):
-        return ("reactor left in unclean state, the following Selectables "
-                "were left over: %s" % (msg,))
-
-
-
-
-class PendingTimedCallsError(DirtyReactorError):
-    """
-    DEPRECATED in Twisted 8.0. This is not used by Trial any more.
-    """
-
-    def _getMessage(self, msg):
-        return ("pendingTimedCalls still pending (consider setting "
-                "twisted.internet.base.DelayedCall.debug = True): %s" % (msg,))
 
 
 
@@ -303,6 +259,14 @@ def acquireAttribute(objects, attr, default=_DEFAULT):
     raise AttributeError('attribute %r not found in %r' % (attr, objects))
 
 
+
+deprecate.deprecatedModuleAttribute(
+    versions.Version("Twisted", 10, 1, 0),
+    "Please use twisted.python.reflect.namedAny instead.",
+    __name__, "findObject")
+
+
+
 def findObject(name):
     """Get a fully-named package, module, module-global object or attribute.
     Forked from twisted.python.reflect.namedAny.
@@ -374,5 +338,93 @@ _runSequentially = defer.deferredGenerator(_runSequentially)
 
 
 
-__all__ = ['FailureError', 'DirtyReactorWarning', 'DirtyReactorError',
-           'PendingTimedCallsError', 'excInfoOrFailureToExcInfo']
+class _NoTrialMarker(Exception):
+    """
+    No trial marker file could be found.
+
+    Raised when trial attempts to remove a trial temporary working directory
+    that does not contain a marker file.
+    """
+
+
+
+def _removeSafely(path):
+    """
+    Safely remove a path, recursively.
+
+    If C{path} does not contain a node named C{_trial_marker}, a
+    L{_NoTrialmarker} exception is raised and the path is not removed.
+    """
+    if not path.child('_trial_marker').exists():
+        raise _NoTrialMarker(
+            '%r is not a trial temporary path, refusing to remove it'
+            % (path,))
+    try:
+        path.remove()
+    except OSError, e:
+        print ("could not remove %r, caught OSError [Errno %s]: %s"
+               % (path, e.errno, e.strerror))
+        try:
+            newPath = FilePath('_trial_temp_old%s' % (randrange(1000000),))
+            path.moveTo(newPath)
+        except OSError, e:
+            print ("could not rename path, caught OSError [Errno %s]: %s"
+                   % (e.errno,e.strerror))
+            raise
+
+
+
+class _WorkingDirectoryBusy(Exception):
+    """
+    A working directory was specified to the runner, but another test run is
+    currently using that directory.
+    """
+
+
+
+def _unusedTestDirectory(base):
+    """
+    Find an unused directory named similarly to C{base}.
+
+    Once a directory is found, it will be locked and a marker dropped into it to
+    identify it as a trial temporary directory.
+
+    @param base: A template path for the discovery process.  If this path
+        exactly cannot be used, a path which varies only in a suffix of the
+        basename will be used instead.
+    @type base: L{FilePath}
+
+    @return: A two-tuple.  The first element is a L{FilePath} representing the
+        directory which was found and created.  The second element is a locked
+        L{FilesystemLock}.  Another call to C{_unusedTestDirectory} will not be
+        able to reused the the same name until the lock is released, either
+        explicitly or by this process exiting.
+    """
+    counter = 0
+    while True:
+        if counter:
+            testdir = base.sibling('%s-%d' % (base.basename(), counter))
+        else:
+            testdir = base
+
+        testDirLock = FilesystemLock(testdir.path + '.lock')
+        if testDirLock.lock():
+            # It is not in use
+            if testdir.exists():
+                # It exists though - delete it
+                _removeSafely(testdir)
+
+            # Create it anew and mark it as ours so the next _removeSafely on it
+            # succeeds.
+            testdir.makedirs()
+            testdir.child('_trial_marker').setContent('')
+            return testdir, testDirLock
+        else:
+            # It is in use
+            if base.basename() == '_trial_temp':
+                counter += 1
+            else:
+                raise _WorkingDirectoryBusy()
+
+
+__all__ = ['excInfoOrFailureToExcInfo', 'suppress']

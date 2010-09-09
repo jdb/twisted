@@ -17,6 +17,7 @@ from twisted.trial import itrial, unittest, runner, reporter, util
 from twisted.trial.reporter import UncleanWarningsReporterWrapper
 from twisted.trial.test import erroneous
 from twisted.trial.unittest import makeTodo, SkipTest, Todo
+from twisted.trial.test import sample
 
 
 class BrokenStream(object):
@@ -113,35 +114,53 @@ class TestErrorReporting(StringTest):
         suite.run(self.result)
         return self.result
 
-    def testFormatErroredMethod(self):
+    def test_formatErroredMethod(self):
+        """
+        A test method which runs and has an error recorded against it is
+        reported in the output stream with the I{ERROR} tag along with a summary
+        of what error was reported and the ID of the test.
+        """
         suite = self.loader.loadClass(erroneous.TestFailureInSetUp)
         output = self.getOutput(suite).splitlines()
-        match = [self.doubleSeparator,
-                 ('[ERROR]: twisted.trial.test.erroneous.'
-                  'TestFailureInSetUp.test_noop'),
-                 'Traceback (most recent call last):',
-                 re.compile(r'^\s+File .*erroneous\.py., line \d+, in setUp$'),
-                 re.compile(r'^\s+raise FoolishError, '
-                            r'.I am a broken setUp method.$'),
-                 ('twisted.trial.test.erroneous.FoolishError: '
-                  'I am a broken setUp method')]
+        match = [
+            self.doubleSeparator,
+            '[ERROR]',
+            'Traceback (most recent call last):',
+            re.compile(r'^\s+File .*erroneous\.py., line \d+, in setUp$'),
+            re.compile(r'^\s+raise FoolishError, '
+                       r'.I am a broken setUp method.$'),
+            ('twisted.trial.test.erroneous.FoolishError: '
+             'I am a broken setUp method'),
+            'twisted.trial.test.erroneous.TestFailureInSetUp.test_noop']
         self.stringComparison(match, output)
 
-    def testFormatFailedMethod(self):
+
+    def test_formatFailedMethod(self):
+        """
+        A test method which runs and has a failure recorded against it is
+        reported in the output stream with the I{FAIL} tag along with a summary
+        of what failure was reported and the ID of the test.
+        """
         suite = self.loader.loadMethod(erroneous.TestRegularFail.test_fail)
         output = self.getOutput(suite).splitlines()
         match = [
             self.doubleSeparator,
-            '[FAIL]: '
-            'twisted.trial.test.erroneous.TestRegularFail.test_fail',
+            '[FAIL]',
             'Traceback (most recent call last):',
             re.compile(r'^\s+File .*erroneous\.py., line \d+, in test_fail$'),
             re.compile(r'^\s+self\.fail\("I fail"\)$'),
-            'twisted.trial.unittest.FailTest: I fail'
+            'twisted.trial.unittest.FailTest: I fail',
+            'twisted.trial.test.erroneous.TestRegularFail.test_fail',
             ]
         self.stringComparison(match, output)
 
-    def testDoctestError(self):
+
+    def test_doctestError(self):
+        """
+        A problem encountered while running a doctest is reported in the output
+        stream with a I{FAIL} or I{ERROR} tag along with a summary of what
+        problem was encountered and the ID of the test.
+        """
         from twisted.trial.test import erroneous
         suite = unittest.decorate(
             self.loader.loadDoctests(erroneous), itrial.ITestCase)
@@ -154,10 +173,11 @@ class TestErrorReporting(StringTest):
                         "Couldn't match 'Failure in example: ' "
                         "or 'Failed example: '")
         expect = [self.doubleSeparator,
-                  re.compile(r'\[(ERROR|FAIL)\]: .*' + re.escape(path))]
+                  re.compile(r'\[(ERROR|FAIL)\]')]
         self.stringComparison(expect, output.splitlines())
 
-    def testHiddenException(self):
+
+    def test_hiddenException(self):
         """
         Check that errors in C{DelayedCall}s get reported, even if the
         test already has a failure.
@@ -170,8 +190,7 @@ class TestErrorReporting(StringTest):
         output = self.getOutput(test).splitlines()
         match = [
             self.doubleSeparator,
-            '[FAIL]: '
-            'twisted.trial.test.erroneous.DelayedCall.testHiddenException',
+            '[FAIL]',
             'Traceback (most recent call last):',
             re.compile(r'^\s+File .*erroneous\.py., line \d+, in '
                        'testHiddenException$'),
@@ -179,17 +198,17 @@ class TestErrorReporting(StringTest):
                        'hidden exception"\)$'),
             'twisted.trial.unittest.FailTest: '
             'Deliberate failure to mask the hidden exception',
-            self.doubleSeparator,
-            '[ERROR]: '
             'twisted.trial.test.erroneous.DelayedCall.testHiddenException',
+            self.doubleSeparator,
+            '[ERROR]',
             'Traceback (most recent call last):',
             re.compile(r'^\s+File .* in runUntilCurrent'),
             re.compile(r'^\s+.*'),
             re.compile('^\s+File .*erroneous\.py", line \d+, in go'),
             re.compile('^\s+raise RuntimeError\(self.hiddenExceptionMsg\)'),
             'exceptions.RuntimeError: something blew up',
+            'twisted.trial.test.erroneous.DelayedCall.testHiddenException',
             ]
-
         self.stringComparison(match, output)
 
 
@@ -294,13 +313,13 @@ exceptions.TypeError: iterable argument required
 
     def test_mutation(self):
         frames = self.f.frames[:]
-        tb = self.result._formatFailureTraceback(self.f)
+        # The call shouldn't mutate the frames.
+        self.result._formatFailureTraceback(self.f)
         self.assertEqual(self.f.frames, frames)
 
 
 class PyunitTestNames(unittest.TestCase):
     def setUp(self):
-        from twisted.trial.test import sample
         self.stream = StringIO.StringIO()
         self.test = sample.PyunitTest('test_foo')
 
@@ -387,7 +406,7 @@ class TestDirtyReactor(unittest.TestCase):
 
     def test_errorByDefault(self):
         """
-        C{DirtyReactorAggregateError}s are reported as errors with the default
+        L{DirtyReactorAggregateError}s are reported as errors with the default
         Reporter.
         """
         result = reporter.Reporter(stream=self.output)
@@ -398,8 +417,8 @@ class TestDirtyReactor(unittest.TestCase):
 
     def test_warningsEnabled(self):
         """
-        C{DirtyReactorErrors}s are reported as warnings when using the
-        L{UncleanWarningsReporterWrapper}.
+        L{DirtyReactorAggregateError}s are reported as warnings when using
+        the L{UncleanWarningsReporterWrapper}.
         """
         result = UncleanWarningsReporterWrapper(
             reporter.Reporter(stream=self.output))
@@ -410,7 +429,7 @@ class TestDirtyReactor(unittest.TestCase):
 
     def test_warningsMaskErrors(self):
         """
-        C{DirtyReactorErrors}s are I{not} reported as errors if the
+        L{DirtyReactorAggregateError}s are I{not} reported as errors if the
         L{UncleanWarningsReporterWrapper} is used.
         """
         result = UncleanWarningsReporterWrapper(
@@ -426,8 +445,8 @@ class TestDirtyReactor(unittest.TestCase):
         Some annoying stuff can pass three-tuples to addError instead of
         Failures (like PyUnit). The wrapper, of course, handles this case,
         since it is a part of L{twisted.trial.itrial.IReporter}! But it does
-        not convert L{DirtyReactorError} to warnings in this case, because
-        nobody should be passing those in the form of three-tuples.
+        not convert L{DirtyReactorAggregateError} to warnings in this case,
+        because nobody should be passing those in the form of three-tuples.
         """
         result = UncleanWarningsReporterWrapper(
             reporter.Reporter(stream=self.output))
@@ -444,7 +463,6 @@ class TestDirtyReactor(unittest.TestCase):
 class TrialTestNames(unittest.TestCase):
 
     def setUp(self):
-        from twisted.trial.test import sample
         self.stream = StringIO.StringIO()
         self.test = sample.FooTest('test_foo')
 
@@ -478,7 +496,6 @@ class TestSkip(unittest.TestCase):
     Tests for L{reporter.Reporter}'s handling of skips.
     """
     def setUp(self):
-        from twisted.trial.test import sample
         self.stream = StringIO.StringIO()
         self.result = reporter.Reporter(self.stream)
         self.test = sample.FooTest('test_foo')
@@ -518,7 +535,7 @@ class TestSkip(unittest.TestCase):
         """
         self.result.addSkip(self.test, 'some reason')
         self.result.done()
-        output = self.stream.getvalue().splitlines()[4]
+        output = self.stream.getvalue().splitlines()[3]
         self.failUnlessEqual(output.strip(), 'some reason')
 
 
@@ -530,7 +547,7 @@ class TestSkip(unittest.TestCase):
         """
         self.result.addSkip(self.test, True)
         self.result.done()
-        output = self.stream.getvalue().splitlines()[4]
+        output = self.stream.getvalue().splitlines()[3]
         self.failUnlessEqual(output, 'True')
 
 
@@ -573,7 +590,6 @@ class TodoTest(unittest.TestCase):
     """
 
     def setUp(self):
-        from twisted.trial.test import sample
         self.stream = StringIO.StringIO()
         self.result = reporter.Reporter(self.stream)
         self.test = sample.FooTest('test_foo')
@@ -646,7 +662,7 @@ class TodoTest(unittest.TestCase):
         self.result.addExpectedFailure(self.test, Failure(Exception()),
                                        makeTodo('some reason'))
         self.result.done()
-        output = self.stream.getvalue().splitlines()[4].strip()
+        output = self.stream.getvalue().splitlines()[3].strip()
         self.assertEqual(output, "Reason: 'some reason'")
 
 
@@ -720,7 +736,6 @@ class MockColorizer:
 
 class TestTreeReporter(unittest.TestCase):
     def setUp(self):
-        from twisted.trial.test import sample
         self.test = sample.FooTest('test_foo')
         self.stream = StringIO.StringIO()
         self.result = reporter.TreeReporter(self.stream)
@@ -787,7 +802,7 @@ class TestTreeReporter(unittest.TestCase):
         """
         try:
             raise RuntimeError('foo')
-        except RuntimeError, excValue:
+        except RuntimeError:
             self.result.addError(self, sys.exc_info())
         self.result.done()
         self.assertEquals(self.log[1], (self.result.FAILURE, 'FAILED'))
@@ -812,6 +827,60 @@ class TestTreeReporter(unittest.TestCase):
         self.assertEqual([], self.result._getPreludeSegments('foo'))
 
 
+    def test_groupResults(self):
+        """
+        If two different tests have the same error, L{Reporter._groupResults}
+        includes them together in one of the tuples in the list it returns.
+        """
+        try:
+            raise RuntimeError('foo')
+        except RuntimeError:
+            self.result.addError(self, sys.exc_info())
+            self.result.addError(self.test, sys.exc_info())
+        try:
+            raise RuntimeError('bar')
+        except RuntimeError:
+            extra = sample.FooTest('test_bar')
+            self.result.addError(extra, sys.exc_info())
+        self.result.done()
+	grouped = self.result._groupResults(
+	    self.result.errors, self.result._formatFailureTraceback)
+        self.assertEquals(grouped[0][1], [self, self.test])
+        self.assertEquals(grouped[1][1], [extra])
+
+
+    def test_printResults(self):
+        """
+        L{Reporter._printResults} uses the results list and formatter callable
+        passed to it to produce groups of results to write to its output stream.
+        """
+        def formatter(n):
+            return str(n) + '\n'
+        first = sample.FooTest('test_foo')
+        second = sample.FooTest('test_bar')
+        third = sample.PyunitTest('test_foo')
+        self.result._printResults(
+            'FOO', [(first, 1), (second, 1), (third, 2)], formatter)
+        self.assertEquals(
+            self.stream.getvalue(),
+            "%(double separator)s\n"
+            "FOO\n"
+            "1\n"
+            "\n"
+            "%(first)s\n"
+            "%(second)s\n"
+            "%(double separator)s\n"
+            "FOO\n"
+            "2\n"
+            "\n"
+            "%(third)s\n" % {
+                'double separator': self.result._doubleSeparator,
+                'first': first.id(),
+                'second': second.id(),
+                'third': third.id(),
+                })
+
+
 
 class TestReporterInterface(unittest.TestCase):
     """
@@ -828,7 +897,6 @@ class TestReporterInterface(unittest.TestCase):
     resultFactory = reporter.Reporter
 
     def setUp(self):
-        from twisted.trial.test import sample
         self.test = sample.FooTest('test_foo')
         self.stream = StringIO.StringIO()
         self.publisher = log.LogPublisher()

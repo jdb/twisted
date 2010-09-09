@@ -6,6 +6,14 @@
 Support for results that aren't immediately available.
 
 Maintainer: Glyph Lefkowitz
+
+@var _NO_RESULT: The result used to represent the fact that there is no
+    result. B{Never ever ever use this as an actual result for a Deferred}.  You
+    have been warned.
+
+@var _CONTINUE: A marker left in L{Deferred.callbacks} to indicate a Deferred
+    chain.  Always accompanied by a Deferred instance in the args tuple pointing
+    at the Deferred which is chained to the Deferred which has this marker.
 """
 
 import traceback
@@ -163,6 +171,11 @@ def getDebugging():
     return Deferred.debug
 
 
+# See module docstring.
+_NO_RESULT = object()
+_CONTINUE = object()
+
+
 
 class Deferred:
     """
@@ -177,19 +190,41 @@ class Deferred:
     that come from outside packages that are not under our control, we use
     threads (see for example L{twisted.enterprise.adbapi}).
 
-    For more information about Deferreds, see doc/howto/defer.html or
-    U{http://twistedmatrix.com/projects/core/documentation/howto/defer.html}
+    For more information about Deferreds, see doc/howto/core/defer.html or
+    U{http://twistedmatrix.com/documents/current/core/howto/defer.html}
 
     When creating a Deferred, you may provide a canceller function, which
     will be called by d.cancel() to let you do any clean-up necessary if the
     user decides not to wait for the deferred to complete.
+
+    @ivar called: A flag which is C{False} until either C{callback} or
+        C{errback} is called and afterwards always C{True}.
+    @type called: C{bool}
+
+    @ivar paused: A counter of how many unmatched C{pause} calls have been made
+        on this instance.
+    @type paused: C{int}
+
+    @ivar _suppressAlreadyCalled: A flag used by the cancellation mechanism
+        which is C{True} if the Deferred has no canceller and has been
+        cancelled, C{False} otherwise.  If C{True}, it can be expected that
+        C{callback} or C{errback} will eventually be called and the result
+        should be silently discarded.
+    @type _suppressAlreadyCalled: C{bool}
+
+    @ivar _runningCallbacks: A flag which is C{True} while this instance is
+        executing its callback chain, used to stop recursive execution of
+        L{_runCallbacks}
+    @type _runningCallbacks: C{bool}
+
+    @ivar _chainedTo: If this Deferred is waiting for the result of another
+        Deferred, this is a reference to the other Deferred.  Otherwise, C{None}.
     """
 
-    called = 0
+    called = False
     paused = 0
-    timeoutCall = None
     _debugInfo = None
-    _suppressAlreadyCalled = 0
+    _suppressAlreadyCalled = False
 
     # Are we currently running a user-installed callback?  Meant to prevent
     # recursive running of callbacks when a reentrant call to add a callback is
@@ -199,6 +234,8 @@ class Deferred:
     # Keep this class attribute for now, for compatibility with code that
     # sets it directly.
     debug = False
+
+    _chainedTo = None
 
     def __init__(self, canceller=None):
         """
@@ -219,7 +256,7 @@ class Deferred:
             above.  This allows clients of code which returns a L{Deferred}
             to cancel it without requiring the L{Deferred} instantiator to
             provide any specific implementation support for cancellation.
-            New in 10.0.
+            New in 10.1.
 
         @type canceller: a 1-argument callable which takes a L{Deferred}. The
             return result is ignored.
@@ -298,7 +335,13 @@ class Deferred:
         chain of d1. Thus any event that fires d1 will also fire d2.
         However, the converse is B{not} true; if d2 is fired d1 will not be
         affected.
+
+        Note that unlike the case where chaining is caused by a L{Deferred}
+        being returned from a callback, it is possible to cause the call
+        stack size limit to be exceeded by chaining many L{Deferred}s
+        together with C{chainDeferred}.
         """
+        d._chainedTo = self
         return self.addCallbacks(d.callback, d.errback)
 
 
@@ -382,7 +425,7 @@ class Deferred:
             else:
                 # Arrange to eat the callback that will eventually be fired
                 # since there was no real canceller.
-                self._suppressAlreadyCalled = 1
+                self._suppressAlreadyCalled = True
             if not self.called:
                 # There was no canceller, or the canceller didn't call
                 # callback or errback.
@@ -392,15 +435,10 @@ class Deferred:
             self.result.cancel()
 
 
-    def _continue(self, result):
-        self.result = result
-        self.unpause()
-
-
     def _startRunCallbacks(self, result):
         if self.called:
             if self._suppressAlreadyCalled:
-                self._suppressAlreadyCalled = 0
+                self._suppressAlreadyCalled = False
                 return
             if self.debug:
                 if self._debugInfo is None:
@@ -414,90 +452,158 @@ class Deferred:
             self._debugInfo.invoker = traceback.format_stack()[:-2]
         self.called = True
         self.result = result
-        if self.timeoutCall:
-            try:
-                self.timeoutCall.cancel()
-            except:
-                pass
-
-            del self.timeoutCall
         self._runCallbacks()
 
 
+    def _continuation(self):
+        """
+        Build a tuple of callback and errback with L{_continue} to be used by
+        L{_addContinue} and L{_removeContinue} on another Deferred.
+        """
+        return ((_CONTINUE, (self,), None),
+                (_CONTINUE, (self,), None))
+
+
     def _runCallbacks(self):
+        """
+        Run the chain of callbacks once a result is available.
+
+        This consists of a simple loop over all of the callbacks, calling each
+        with the current result and making the current result equal to the
+        return value (or raised exception) of that call.
+
+        If C{self._runningCallbacks} is true, this loop won't run at all, since
+        it is already running above us on the call stack.  If C{self.paused} is
+        true, the loop also won't run, because that's what it means to be
+        paused.
+
+        The loop will terminate before processing all of the callbacks if a
+        C{Deferred} without a result is encountered.
+
+        If a C{Deferred} I{with} a result is encountered, that result is taken
+        and the loop proceeds.
+
+        @note: The implementation is complicated slightly by the fact that
+            chaining (associating two Deferreds with each other such that one
+            will wait for the result of the other, as happens when a Deferred is
+            returned from a callback on another Deferred) is supported
+            iteratively rather than recursively, to avoid running out of stack
+            frames when processing long chains.
+        """
         if self._runningCallbacks:
             # Don't recursively run callbacks
             return
-        if not self.paused:
-            while self.callbacks:
-                item = self.callbacks.pop(0)
+
+        # Keep track of all the Deferreds encountered while propagating results
+        # up a chain.  The way a Deferred gets onto this stack is by having
+        # added its _continuation() to the callbacks list of a second Deferred
+        # and then that second Deferred being fired.  ie, if ever had _chainedTo
+        # set to something other than None, you might end up on this stack.
+        chain = [self]
+
+        while chain:
+            current = chain[-1]
+
+            if current.paused:
+                # This Deferred isn't going to produce a result at all.  All the
+                # Deferreds up the chain waiting on it will just have to...
+                # wait.
+                return
+
+            finished = True
+            current._chainedTo = None
+            while current.callbacks:
+                item = current.callbacks.pop(0)
                 callback, args, kw = item[
-                    isinstance(self.result, failure.Failure)]
+                    isinstance(current.result, failure.Failure)]
                 args = args or ()
                 kw = kw or {}
+
+                # Avoid recursion if we can.
+                if callback is _CONTINUE:
+                    # Give the waiting Deferred our current result and then
+                    # forget about that result ourselves.
+                    chainee = args[0]
+                    chainee.result = current.result
+                    current.result = None
+                    # Making sure to update _debugInfo
+                    if current._debugInfo is not None:
+                        current._debugInfo.failResult = None
+                    chainee.paused -= 1
+                    chain.append(chainee)
+                    # Delay cleaning this Deferred and popping it from the chain
+                    # until after we've dealt with chainee.
+                    finished = False
+                    break
+
                 try:
-                    self._runningCallbacks = True
+                    current._runningCallbacks = True
                     try:
-                        self.result = callback(self.result, *args, **kw)
+                        current.result = callback(current.result, *args, **kw)
                     finally:
-                        self._runningCallbacks = False
-                    if isinstance(self.result, Deferred):
-                        # note: this will cause _runCallbacks to be called
-                        # recursively if self.result already has a result.
-                        # This shouldn't cause any problems, since there is no
-                        # relevant state in this stack frame at this point.
-                        # The recursive call will continue to process
-                        # self.callbacks until it is empty, then return here,
-                        # where there is no more work to be done, so this call
-                        # will return as well.
-                        self.pause()
-                        self.result.addBoth(self._continue)
-                        break
+                        current._runningCallbacks = False
                 except:
-                    self.result = failure.Failure()
+                    current.result = failure.Failure()
+                else:
+                    if isinstance(current.result, Deferred):
+                        # The result is another Deferred.  If it has a result,
+                        # we can take it and keep going.
+                        resultResult = getattr(current.result, 'result', _NO_RESULT)
+                        if resultResult is _NO_RESULT or isinstance(resultResult, Deferred) or current.result.paused:
+                            # Nope, it didn't.  Pause and chain.
+                            current.pause()
+                            current._chainedTo = current.result
+                            # Note: current.result has no result, so it's not
+                            # running its callbacks right now.  Therefore we can
+                            # append to the callbacks list directly instead of
+                            # using addCallbacks.
+                            current.result.callbacks.append(current._continuation())
+                            break
+                        else:
+                            # Yep, it did.  Steal it.
+                            current.result.result = None
+                            # Make sure _debugInfo's failure state is updated.
+                            if current.result._debugInfo is not None:
+                                current.result._debugInfo.failResult = None
+                            current.result = resultResult
 
-        if isinstance(self.result, failure.Failure):
-            self.result.cleanFailure()
-            if self._debugInfo is None:
-                self._debugInfo = DebugInfo()
-            self._debugInfo.failResult = self.result
-        else:
-            if self._debugInfo is not None:
-                self._debugInfo.failResult = None
+            if finished:
+                # As much of the callback chain - perhaps all of it - as can be
+                # processed right now has been.  The current Deferred is waiting on
+                # another Deferred or for more callbacks.  Before finishing with it,
+                # make sure its _debugInfo is in the proper state.
+                if isinstance(current.result, failure.Failure):
+                    # Stash the Failure in the _debugInfo for unhandled error
+                    # reporting.
+                    current.result.cleanFailure()
+                    if current._debugInfo is None:
+                        current._debugInfo = DebugInfo()
+                    current._debugInfo.failResult = current.result
+                else:
+                    # Clear out any Failure in the _debugInfo, since the result
+                    # is no longer a Failure.
+                    if current._debugInfo is not None:
+                        current._debugInfo.failResult = None
 
+                # This Deferred is done, pop it from the chain and move back up
+                # to the Deferred which supplied us with our result.
+                chain.pop()
 
-    def setTimeout(self, seconds, timeoutFunc=timeout, *args, **kw):
-        """
-        Set a timeout function to be triggered if I am not called.
-
-        @param seconds: How long to wait (from now) before firing the
-        C{timeoutFunc}.
-
-        @param timeoutFunc: will receive the L{Deferred} and *args, **kw as its
-        arguments.  The default C{timeoutFunc} will call the errback with a
-        L{TimeoutError}.
-        """
-        warnings.warn(
-            "Deferred.setTimeout is deprecated.  Look for timeout "
-            "support specific to the API you are using instead.",
-            DeprecationWarning, stacklevel=2)
-
-        if self.called:
-            return
-        assert not self.timeoutCall, "Don't call setTimeout twice on the same Deferred."
-
-        from twisted.internet import reactor
-        self.timeoutCall = reactor.callLater(
-            seconds,
-            lambda: self.called or timeoutFunc(self, *args, **kw))
-        return self.timeoutCall
 
     def __str__(self):
+        """
+        Return a string representation of this C{Deferred}.
+        """
         cname = self.__class__.__name__
-        if hasattr(self, 'result'):
-            return "<%s at %s  current result: %r>" % (cname, hex(unsignedID(self)),
-                                                       self.result)
-        return "<%s at %s>" % (cname, hex(unsignedID(self)))
+        result = getattr(self, 'result', _NO_RESULT)
+        myID = hex(unsignedID(self))
+        if self._chainedTo is not None:
+            result = ' waiting on Deferred at %s' % (hex(unsignedID(self._chainedTo)),)
+        elif result is _NO_RESULT:
+            result = ''
+        else:
+            result = ' current result: %r' % (result,)
+        return "<%s at %s%s>" % (cname, myID, result)
     __repr__ = __str__
 
 
@@ -508,7 +614,6 @@ class DebugInfo:
     """
 
     failResult = None
-
 
     def _getDebugTracebacks(self):
         info = ''
@@ -592,40 +697,62 @@ class FirstError(Exception):
 
 class DeferredList(Deferred):
     """
-    I combine a group of deferreds into one callback.
+    L{DeferredList} is a tool for collecting the results of several Deferreds.
 
-    I track a list of L{Deferred}s for their callbacks, and make a single
-    callback when they have all completed, a list of (success, result)
-    tuples, 'success' being a boolean.
+    This tracks a list of L{Deferred}s for their results, and makes a single
+    callback when they have all completed.  By default, the ultimate result is a
+    list of (success, result) tuples, 'success' being a boolean.
+    L{DeferredList} exposes the same API that L{Deferred} does, so callbacks and
+    errbacks can be added to it in the same way.
 
-    Note that you can still use a L{Deferred} after putting it in a
-    DeferredList.  For example, you can suppress 'Unhandled error in Deferred'
-    messages by adding errbacks to the Deferreds *after* putting them in the
-    DeferredList, as a DeferredList won't swallow the errors.  (Although a more
-    convenient way to do this is simply to set the consumeErrors flag)
+    L{DeferredList} is implemented by adding callbacks and errbacks to each
+    L{Deferred} in the list passed to it.  This means callbacks and errbacks
+    added to the Deferreds before they are passed to L{DeferredList} will change
+    the result that L{DeferredList} sees (ie, L{DeferredList} is not special).
+    Callbacks and errbacks can also be added to the Deferreds after they are
+    passed to L{DeferredList} and L{DeferredList} may change the result that
+    they see.
+
+    See the documentation for the C{__init__} arguments for more information.
     """
 
-    fireOnOneCallback = 0
-    fireOnOneErrback = 0
+    fireOnOneCallback = False
+    fireOnOneErrback = False
 
-
-    def __init__(self, deferredList, fireOnOneCallback=0, fireOnOneErrback=0,
-                 consumeErrors=0):
+    def __init__(self, deferredList, fireOnOneCallback=False,
+                 fireOnOneErrback=False, consumeErrors=False):
         """
         Initialize a DeferredList.
 
-        @type deferredList:  C{list} of L{Deferred}s
         @param deferredList: The list of deferreds to track.
-        @param fireOnOneCallback: (keyword param) a flag indicating that
-                             only one callback needs to be fired for me to call
-                             my callback
-        @param fireOnOneErrback: (keyword param) a flag indicating that
-                            only one errback needs to be fired for me to call
-                            my errback
-        @param consumeErrors: (keyword param) a flag indicating that any errors
-                            raised in the original deferreds should be
-                            consumed by this DeferredList.  This is useful to
-                            prevent spurious warnings being logged.
+        @type deferredList:  C{list} of L{Deferred}s
+
+        @param fireOnOneCallback: (keyword param) a flag indicating that this
+            L{DeferredList} will fire when the first L{Deferred} in
+            C{deferredList} fires with a non-failure result without waiting for
+            any of the other Deferreds.  When this flag is set, the DeferredList
+            will fire with a two-tuple: the first element is the index in
+            C{deferredList} of the Deferred which fired; the second element is
+            the result of that Deferred.
+        @type fireOnOneCallback: C{bool}
+
+        @param fireOnOneErrback: (keyword param) a flag indicating that this
+            L{DeferredList} will fire when the first L{Deferred} in
+            C{deferredList} fires with a failure result without waiting for any
+            of the other Deferreds.  When this flag is set, if a Deferred in the
+            list errbacks, the DeferredList will errback with a L{FirstError}
+            failure wrapping the failure of that Deferred.
+        @type fireOnOneErrback: C{bool}
+
+        @param consumeErrors: (keyword param) a flag indicating that failures in
+            any of the included L{Deferreds} should not be propagated to
+            errbacks added to the individual L{Deferreds} after this
+            L{DeferredList} is constructed.  After constructing the
+            L{DeferredList}, any errors in the individual L{Deferred}s will be
+            converted to a callback result of C{None}.  This is useful to
+            prevent spurious 'Unhandled error in Deferred' messages from being
+            logged.  This does not prevent C{fireOnOneErrback} from working.
+        @type consumeErrors: C{bool}
         """
         self.resultList = [None] * len(deferredList)
         Deferred.__init__(self)
@@ -670,7 +797,7 @@ class DeferredList(Deferred):
 
 
 
-def _parseDListResult(l, fireOnOneErrback=0):
+def _parseDListResult(l, fireOnOneErrback=False):
     if __debug__:
         for success, value in l:
             assert success
@@ -687,7 +814,7 @@ def gatherResults(deferredList):
 
     @type deferredList:  C{list} of L{Deferred}s
     """
-    d = DeferredList(deferredList, fireOnOneErrback=1)
+    d = DeferredList(deferredList, fireOnOneErrback=True)
     d.addCallback(_parseDListResult)
     return d
 
@@ -1064,12 +1191,12 @@ class DeferredLock(_ConcurrencyPrimitive):
     """
     A lock for event driven systems.
 
-    @ivar locked: C{True} when this Lock has been acquired, false at all
-    other times.  Do not change this value, but it is useful to
-    examine for the equivalent of a "non-blocking" acquisition.
+    @ivar locked: C{True} when this Lock has been acquired, false at all other
+        times.  Do not change this value, but it is useful to examine for the
+        equivalent of a "non-blocking" acquisition.
     """
 
-    locked = 0
+    locked = False
 
 
     def _cancelAcquire(self, d):
@@ -1100,7 +1227,7 @@ class DeferredLock(_ConcurrencyPrimitive):
         if self.locked:
             self.waiting.append(d)
         else:
-            self.locked = 1
+            self.locked = True
             d.callback(self)
         return d
 
@@ -1114,10 +1241,10 @@ class DeferredLock(_ConcurrencyPrimitive):
         resource is free.
         """
         assert self.locked, "Tried to release an unlocked lock"
-        self.locked = 0
+        self.locked = False
         if self.waiting:
             # someone is waiting to acquire lock
-            self.locked = 1
+            self.locked = True
             d = self.waiting.pop(0)
             d.callback(self)
 

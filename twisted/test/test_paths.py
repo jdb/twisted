@@ -136,6 +136,16 @@ class AbstractFilePathTestCase(unittest.TestCase):
         self.failUnlessEqual(f2.open().read(), self.f2content)
 
 
+    def test_multipleChildSegments(self):
+        """
+        C{fp.descendant([a, b, c])} returns the same L{FilePath} as is returned
+        by C{fp.child(a).child(b).child(c)}.
+        """
+        multiple = self.path.descendant(['a', 'b', 'c'])
+        single = self.path.child('a').child('b').child('c')
+        self.assertEquals(multiple, single)
+
+
     def test_dictionaryKeys(self):
         """
         Verify that path instances are usable as dictionary keys.
@@ -306,6 +316,29 @@ class ZipFilePathTestCase(AbstractFilePathTestCase):
         child = relpath.child("foo")
 
         # Check using a path without the cwd prepended
+        self.assertEquals(repr(child), pathRepr)
+
+
+    def test_zipPathReprParentDirSegment(self):
+        """
+        The repr of a ZipPath with C{".."} in the internal part of its path
+        includes the C{".."} rather than applying the usual parent directory
+        meaning.
+        """
+        child = self.path.child("foo").child("..").child("bar")
+        pathRepr = "ZipPath(%r)" % (
+            self.cmn + ".zip" + os.sep.join(["", "foo", "..", "bar"]))
+        self.assertEquals(repr(child), pathRepr)
+
+
+    def test_zipPathReprEscaping(self):
+        """
+        Bytes in the ZipPath path which have special meaning in Python
+        string literals are escaped in the ZipPath repr.
+        """
+        child = self.path.child("'")
+        path = self.cmn + ".zip" + os.sep.join(["", "'"])
+        pathRepr = "ZipPath('%s')" % (path.encode('string-escape'),)
         self.assertEquals(repr(child), pathRepr)
 
 
@@ -782,6 +815,16 @@ class FilePathTestCase(AbstractFilePathTestCase):
 
         self.failIf(filepath.FilePath('z') !=
                     filepath.FilePath('z'))
+
+
+    def test_descendantOnly(self):
+        """
+        If C{".."} is in the sequence passed to L{FilePath.descendant},
+        L{InsecurePath} is raised.
+        """
+        self.assertRaises(
+            filepath.InsecurePath, self.path.descendant, ['a', '..'])
+
 
     def testSibling(self):
         p = self.path.child('sibling_start')

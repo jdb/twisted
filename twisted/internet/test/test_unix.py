@@ -14,11 +14,17 @@ try:
 except ImportError:
     AF_UNIX = None
 
+from zope.interface.verify import verifyObject
+
 from twisted.python.hashlib import md5
+from twisted.internet.interfaces import IConnector
 from twisted.internet.address import UNIXAddress
+from twisted.internet import interfaces
 from twisted.internet.protocol import (
     ServerFactory, ClientFactory, DatagramProtocol)
 from twisted.internet.test.reactormixins import ReactorBuilder
+from twisted.internet.test.test_tcp import TCPPortTestsBuilder
+
 
 
 class UNIXFamilyMixin:
@@ -54,6 +60,15 @@ class UNIXTestsBuilder(UNIXFamilyMixin, ReactorBuilder):
     """
     Builder defining tests relating to L{IReactorUNIX}.
     """
+    def test_interface(self):
+        """
+        L{IReactorUNIX.connectUNIX} returns an object providing L{IConnector}.
+        """
+        reactor = self.buildReactor()
+        connector = reactor.connectUNIX(self.mktemp(), ClientFactory())
+        self.assertTrue(verifyObject(IConnector, connector))
+
+
     def test_mode(self):
         """
         The UNIX socket created by L{IReactorUNIX.listenUNIX} is created with
@@ -109,7 +124,6 @@ class UNIXDatagramTestsBuilder(UNIXFamilyMixin, ReactorBuilder):
         self._modeTest('listenUNIXDatagram', self.mktemp(), DatagramProtocol())
 
 
-
     def test_listenOnLinuxAbstractNamespace(self):
         """
         On Linux, a UNIX socket path may begin with C{'\0'} to indicate a socket
@@ -126,5 +140,28 @@ class UNIXDatagramTestsBuilder(UNIXFamilyMixin, ReactorBuilder):
 
 
 
+class UNIXPortTestsBuilder(TCPPortTestsBuilder):
+    """
+    Tests for L{IReactorUNIX.listenUnix}
+    """
+
+    requiredInterfaces = [interfaces.IReactorUNIX]
+
+    def getListeningPort(self, reactor):
+        """
+        Get a UNIX port from a reactor
+        """
+        return reactor.listenUNIX(self.mktemp(), ServerFactory())
+
+
+    def getExpectedConnectionLostLogMsg(self, port):
+        """
+        Get the expected connection lost message for a UNIX port
+        """
+        return "(UNIX Port %s Closed)" % (repr(port.port),)
+
+
+
 globals().update(UNIXTestsBuilder.makeTestCaseClasses())
 globals().update(UNIXDatagramTestsBuilder.makeTestCaseClasses())
+globals().update(UNIXPortTestsBuilder.makeTestCaseClasses())

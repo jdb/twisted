@@ -418,6 +418,39 @@ class IReactorUNIXDatagram(Interface):
 
 
 
+class IReactorWin32Events(Interface):
+    """
+    Win32 Event API methods
+
+    @since: 10.2
+    """
+
+    def addEvent(event, fd, action):
+        """
+        Add a new win32 event to the event loop.
+
+        @param event: a Win32 event object created using win32event.CreateEvent()
+
+        @param fd: an instance of L{twisted.internet.abstract.FileDescriptor}
+
+        @param action: a string that is a method name of the fd instance.
+                       This method is called in response to the event.
+
+        @return: None
+        """
+
+
+    def removeEvent(event):
+        """
+        Remove an event.
+
+        @param event: a Win32 event object added using L{IReactorWin32Events.addEvent}
+
+        @return: None
+        """
+
+
+
 class IReactorUDP(Interface):
     """
     UDP socket methods.
@@ -447,11 +480,16 @@ class IReactorMulticast(Interface):
         L{DatagramProtocol<twisted.internet.protocol.DatagramProtocol>} to the
         given numeric UDP port.
 
-        @param listenMultiple: boolean indicating whether multiple sockets can
-                               bind to same UDP port.
+        @param listenMultiple: If set to True, allows multiple sockets to
+            bind to the same address and port number at the same time.
+        @type listenMultiple: C{bool}
 
         @returns: An object which provides L{IListeningPort}.
+
+        @see: L{twisted.internet.interfaces.IMulticastTransport}
+        @see: U{http://twistedmatrix.com/documents/current/core/howto/udp.html}
         """
+
 
 
 class IReactorProcess(Interface):
@@ -572,17 +610,6 @@ class IReactorTime(Interface):
                  C{reset()} methods.
         """
 
-    def cancelCallLater(callID):
-        """
-        This method is deprecated.
-
-        Cancel a call that would happen later.
-
-        @param callID: this is an opaque identifier returned from C{callLater}
-                       that will be used to cancel a specific call.
-
-        @raise ValueError: if the callID is not recognized.
-        """
 
     def getDelayedCalls():
         """
